@@ -1,0 +1,6 @@
+opencv-python
+numpy
+numpy-stl
+flask
+# RPi.GPIO  <-- Na PC/Simulaci zakomentuj, na Raspberry odkomentuj
+# gpiozero  <-- Na PC/Simulaci zakomentuj, na Raspberry odkomentuj
