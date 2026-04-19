@@ -20,7 +20,7 @@ TOP_MARGIN = 150
 REFLECTION_OFFSET = 230  
 LEFT_MARGIN = 5          # Zmenšeno, aby to neřezalo rohy krychle!
 
-LASER_THRESHOLD = 40     # Vráceno na rozumnou hodnotu proti šumu
+LASER_THRESHOLD = 60     # Vyšší próg - chyť jen silný laser, ne šum!
 DEBUG_MODE = True
 DEBUG_DIR = "debug_frames"
 
@@ -31,9 +31,6 @@ DEBUG_DIR = "debug_frames"
 # Zadej záporné číslo (např. -50, -120) pro posun žluté čáry DOLEVA.
 # Zadej kladné číslo (např. 50) pro posun DOPRAVA.
 CENTER_OFFSET = 0  
-
-# Měřítko výsledného STL modelu (kdyby byl moc velký/malý)
-SCALE_FACTOR = 1.0  
 
 # ==========================================
 # --- GLOBÁLNÍ STAV ---
@@ -68,15 +65,18 @@ def build_3d_model(images):
         for f in glob.glob(os.path.join(DEBUG_DIR, "*.jpg")):
             os.remove(f)
     
-    print("Zahajuji skenování s OPRAVENOU OSOU ROTACE...")
+    print("Zahajuji skenování s JEDNODUCHÝM MODELEM...")
     for idx, img_path in enumerate(images):
         while state["scan_state"] == "pozastaveno":
             time.sleep(1)
             if stop_event.is_set(): return None
         if stop_event.is_set(): return None
 
+        print(f"Skenuji obrázek {idx+1}/{num_images}: {img_path}")
         img = cv2.imread(img_path)
-        if img is None: continue
+        if img is None: 
+            print(f"  CHYBA: Nelze načíst obrázek!")
+            continue
             
         debug_img = img.copy() if DEBUG_MODE else None
 
@@ -85,94 +85,112 @@ def build_3d_model(images):
         laser_mask = cv2.GaussianBlur(r, (7, 7), 0)
 
         height, width = laser_mask.shape
-        
-        # --- APLIKACE POSUNU OSY ---
-        true_center_x = int((width // 2) + CENTER_OFFSET)
+        center_x = width // 2
         
         angle = (idx / num_images) * 2 * np.pi
         profile_3d = []
         
-        safe_height = height - REFLECTION_OFFSET 
+        # Najdi spodek - hledej maximum z CELÉHO řádku, který je VLEVO od středu
+        bottom_row = 0
+        for r in range(height):
+            col_max = np.argmax(laser_mask[r, :])
+            # DŮLEŽITÉ: Pokud je maximum vlevo od středu (laser točky vlevo!)
+            if col_max < center_x and laser_mask[r, col_max] > LASER_THRESHOLD:
+                bottom_row = r
         
+        # Debug čáry
         if DEBUG_MODE:
-            cv2.line(debug_img, (0, safe_height), (width, safe_height), (255, 0, 0), 2) 
-            cv2.line(debug_img, (true_center_x, 0), (true_center_x, height), (0, 255, 255), 2)  # ŽLUTÁ ČÁRA - OPRAVENÝ STŘED  
-            cv2.line(debug_img, (LEFT_MARGIN, 0), (LEFT_MARGIN, height), (255, 0, 255), 1) 
-            cv2.line(debug_img, (0, TOP_MARGIN), (width, TOP_MARGIN), (0, 165, 255), 2)    
+            cv2.line(debug_img, (0, bottom_row), (width, bottom_row), (255, 0, 0), 2)
+            cv2.line(debug_img, (center_x, 0), (center_x, height), (0, 255, 255), 2)
         
-        for y in range(TOP_MARGIN, safe_height, 5): 
-            # Hledáme od kraje až po náš nový střed
-            row = laser_mask[y, LEFT_MARGIN:true_center_x]
+        # --- ALGORITMUS: VEZMI MAXIMUM Z CELÉHO ŘÁDKU, ALE JENOM POKUD JE VLEVO ---
+        for y in range(height):
+            # Najdi maximum v CELÉM řádku
+            col_max = np.argmax(laser_mask[y, :])
             
-            if len(row) > 0:
-                max_intensity = np.max(row)
+            # ZÁSADNÍ: Podmínka - maximum musí být vlevo od středu a dostatečně jasné!
+            # (Takže ignorujeme pravý laser úplně)
+            if col_max < center_x and laser_mask[y, col_max] > LASER_THRESHOLD:
+                # Výška = y minus spodek
+                H = y - bottom_row
+                # Vzdálenost = sloupec minus střed (bude negativní, což je v pořádku!)
+                distance = col_max - center_x
                 
-                if max_intensity > LASER_THRESHOLD:
-                    max_x_local = np.argmax(row)
-                    max_x = max_x_local + LEFT_MARGIN
-                    
-                    # Ochrana proti zdi na okraji
-                    if max_x_local < 3:
-                        profile_3d.append([0, 0, safe_height - y])
-                        continue
-                        
-                    start_x = max(LEFT_MARGIN, max_x - 15)
-                    end_x = min(true_center_x, max_x + 15)
-                    
-                    local_region = laser_mask[y, start_x:end_x]
-                    local_brights = np.where(local_region > LASER_THRESHOLD)[0]
-                    
-                    if len(local_brights) >= 1:
-                        x_mean = int(start_x + np.mean(local_brights))
-                        
-                        # --- JEDNODUCHÁ A SPRÁVNÁ MATIKA S NOVÝM STŘEDEM ---
-                        dx = true_center_x - x_mean  
-                        radius = dx * SCALE_FACTOR
-                        
-                        # Absolutní gilotina proti šumu (s poloměrem přes celý obraz)
-                        if radius > width:
-                            profile_3d.append([0, 0, safe_height - y])
-                            continue
-                        
-                        X = radius * np.cos(angle)
-                        Y = radius * np.sin(angle)
-                        Z = safe_height - y 
-                        # ---------------------------------------------------
-                        
-                        profile_3d.append([X, Y, Z])
-                        
-                        if DEBUG_MODE:
-                            cv2.circle(debug_img, (x_mean, y), 2, (0, 255, 0), -1)
-                    else:
-                        profile_3d.append([0, 0, safe_height - y])
-                else:
-                    profile_3d.append([0, 0, safe_height - y])
-            else:
-                profile_3d.append([0, 0, safe_height - y])
+                # Konvertuj na kartézské
+                X = distance * np.cos(angle)
+                Y = distance * np.sin(angle)
+                Z = H
+                
+                profile_3d.append([X, Y, Z])
+                
+                if DEBUG_MODE:
+                    cv2.circle(debug_img, (col_max, y), 2, (0, 255, 0), -1)
                 
         if DEBUG_MODE:
             debug_filename = os.path.join(DEBUG_DIR, f"debug_{idx:03d}.jpg")
             cv2.imwrite(debug_filename, debug_img)
 
         points_grid.append(profile_3d)
+        print(f"  Profil {idx}: {len(profile_3d)} bodů detekováno")
         state["scan_process"]["pos"] = idx + 1
         
-    print("Sestavuji 3D mesh a ukládám do STL...")
-    vertices = []
+    print("Sestavuji 3D mesh - jen bočni plochy...")
+    print(f"Celkem obrázků: {len(points_grid)}")
+    print(f"Bodů v jednotlivych profilech: {[len(p) for p in points_grid[:5]]}... (prvních 5)")
+    
+    # Kontrola - máme vůbec nějaké body?
+    total_points = sum(len(p) for p in points_grid)
+    print(f"CELKOM BODŮ V SITI: {total_points}")
+    
+    if total_points == 0:
+        print("CHYBA: Nebyli detekováni žádné body! Zkontroluj detekci laseru.")
+        return None
+    
+    # --- ZÁSADNÍ: NORMALIZUJ VŠECHNY PROFILY NA STEJNOU DÉLKU ---
+    # (Jak to dělá originální script - jinak se rozbije mesh)
+    print("Normalizuji délky profilů...")
+    shortest = min(len(profile) for profile in points_grid) if points_grid else 0
+    print(f"Nejkratší profil: {shortest} bodů")
+    
+    # --- VERTICAL RESOLUTION: Sníž počet bodů (jako originální script) ---
+    # Máš příliš mnoho bodů na profil (2049), chceme jen ~100-200
+    target_points = 100  # Kolik bodů chceme na výšku
+    if shortest > target_points:
+        step = max(1, shortest // target_points)
+        print(f"Snižuji verifikální rozlišení: vezmeme každý {step}. bod")
+        for profile in points_grid:
+            profile[:] = profile[::step]  # Vezmi jen každý step-tý bod
+    
+    # Znova normalizuj po snížení rozlišení
+    shortest = min(len(profile) for profile in points_grid) if points_grid else 0
+    print(f"Po snížení rozlišení: nejkratší profil má {shortest} bodů")
+    
+    for profile in points_grid:
+        while len(profile) > shortest:
+            profile.pop(len(profile) - 2)  # Odstraň prostřední bodu, ne poslední
+    
+    print(f"Profily normalizovány - všechny mají nyní {shortest} bodů")
+    vertices_list = []
+    
+    # JEDNODUŠE: Spojit sousední řezy trojúhelníky (jako běžný 3D scan)
     for i in range(len(points_grid)):
-        next_i = (i + 1) % len(points_grid)
+        next_i = (i + 1) % len(points_grid)  # Cyklicky - poslední se napojí na první
+        
+        # Projdeme všechny body v profilu
         for j in range(len(points_grid[i]) - 1):
-            p1 = points_grid[i][j]
-            p2 = points_grid[next_i][j]
-            p3 = points_grid[i][j+1]
-            p4 = points_grid[next_i][j+1]
+            # Čtyři rohy kvadru mezi dvěma profily
+            p1 = points_grid[i][j]          # Aktuální profil, nižší bod
+            p2 = points_grid[next_i][j]     # Další profil, nižší bod
+            p3 = points_grid[i][j+1]        # Aktuální profil, vyšší bod
+            p4 = points_grid[next_i][j+1]   # Další profil, vyšší bod
             
-            vertices.append([p1, p2, p3])
-            vertices.append([p3, p2, p4])
-            
-    np_vertices = np.array(vertices)
+            # Dva trojúhelníky pro každý čtverec (správné pořadí normál)
+            vertices_list.append([p1, p2, p3])
+            vertices_list.append([p2, p4, p3])
+    
+    np_vertices = np.array(vertices_list)
     stl_mesh = mesh.Mesh(np.zeros(np_vertices.shape[0], dtype=mesh.Mesh.dtype))
-    for i, f in enumerate(vertices):
+    for i, face in enumerate(vertices_list):
         for j in range(3):
             stl_mesh.vectors[i][j] = np_vertices[i][j]
             
