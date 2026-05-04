@@ -74,12 +74,12 @@ if len(points_B) > 0 and len(points_T) > 0:
     mesh_B = trimesh.points.PointCloud(points_B).convex_hull
     mesh_T = trimesh.points.PointCloud(points_T).convex_hull
     
-    mesh_B.export("model_B.stl")
-    mesh_T.export("model_T.stl")
+    mesh_B.export("./static/scans/model_B.stl")
+    mesh_T.export("./static/scans/model_T.stl")
 
     try:
         difference = mesh_B.difference(mesh_T)
-        difference.export("rozdil_modelu.stl")
+        difference.export("./static/scans/rozdil_modelu.stl")
         print("Rozdíl (B - T) exportován.")
     except Exception as e:
         print(f"Chyba při operaci rozdílu: {e}")
